@@ -1,0 +1,3 @@
+[submodule "esp32-dev-container-template"]
+	path = esp32-dev-container-template
+	url = https://github.com/bl2404/esp32-dev-container-template.git

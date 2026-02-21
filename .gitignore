@@ -1,0 +1,7 @@
+*sdkconfig*
+/build/
+build/
+*/build/
+managed_components
+dependencies.lock
+Kconfig.projbuild
