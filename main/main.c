@@ -27,6 +27,7 @@
 #define DSHOT_ESC_GPIO_NUM 8
 
 static const char *TAG = "prop-test-rig";
+static bool end = false;
 
 int32_t get_tenso_data(hx711_t *tenso)
 {
@@ -179,18 +180,6 @@ void throttle(void *pvParameters)
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_3, &config));
 
-    // ADC Oneshot Analog Read loop
-    // while (1)
-    // {
-    //     // Read ADC value with Oneshot
-    //     ESP_ERROR_CHECK(adc_oneshot_read(adc_handle, ADC_CHANNEL_3, &adc_value));
-    //     // Print ADC value
-    //     float voltage = (float)adc_value / 4096.0 * 100;
-    //     ESP_LOGI("Throttle: ", "%f", voltage);
-    //     // Delay 1 second
-    //     vTaskDelay(1000 / portTICK_PERIOD_MS);
-    // }
-
     ESP_LOGI(TAG, "Create RMT TX channel");
     rmt_channel_handle_t esc_chan = NULL;
     rmt_tx_channel_config_t tx_chan_config = {
@@ -207,7 +196,7 @@ void throttle(void *pvParameters)
     dshot_esc_encoder_config_t encoder_config = {
         .resolution = DSHOT_ESC_RESOLUTION_HZ,
         .baud_rate = 300000, // DSHOT300 protocol
-        .post_delay_us = 50, // extra delay between each frame
+        .post_delay_us = 20, // extra delay between each frame
     };
     ESP_ERROR_CHECK(rmt_new_dshot_esc_encoder(&encoder_config, &dshot_encoder));
 
@@ -227,15 +216,22 @@ void throttle(void *pvParameters)
     vTaskDelay(pdMS_TO_TICKS(5000));
 
     ESP_LOGI(TAG, "Increase throttle, no telemetry");
-    for (uint16_t thro = 100; thro < 1000; thro += 10)
+    for (uint16_t thro = 50; thro < 2047; thro += 10)
     {
+        if (end)
+        {
+            throttle.throttle = 0;
+            ESP_ERROR_CHECK(rmt_transmit(esc_chan, dshot_encoder, &throttle, sizeof(throttle), &tx_config));
+            return;
+        }
+        ESP_LOGI(TAG, "Throttle: %i", thro);
         throttle.throttle = thro;
         ESP_ERROR_CHECK(rmt_transmit(esc_chan, dshot_encoder, &throttle, sizeof(throttle), &tx_config));
         // the previous loop transfer is till undergoing, we need to stop it and restart,
         // so that the new throttle can be updated on the output
         ESP_ERROR_CHECK(rmt_disable(esc_chan));
         ESP_ERROR_CHECK(rmt_enable(esc_chan));
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -246,4 +242,5 @@ void app_main()
     //  xTaskCreate(blink_led, "blink_led", configMINIMAL_STACK_SIZE * 2, NULL, 4, NULL);
     // xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 5, NULL);
     xTaskCreate(throttle, "throttle", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
+    // xTaskCreate(button, "button", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
 }
