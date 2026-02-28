@@ -26,8 +26,14 @@
 #define DSHOT_ESC_RESOLUTION_HZ 40000000 // 40MHz resolution, DSHot protocol needs a relative high resolution
 #define DSHOT_ESC_GPIO_NUM 8
 
+#define ACS758_VCC 3.3f
+#define ACS758_ZERO_VOLT (ACS758_VCC / 2.0f) // ~1.65V
+#define ACS758_SENSITIVITY 0.040f            // V/A for ±50A
+
+// Buffer for storing last 20 measurements
+#define ADC_BUFFER_SIZE 100
+
 static const char *TAG = "prop-test-rig";
-static bool end = false;
 
 int32_t get_tenso_data(hx711_t *tenso)
 {
@@ -133,53 +139,71 @@ void mpu6050_test(void *pvParameters)
 
 void adc_read(void *pvParameters)
 {
+    vTaskDelay(pdMS_TO_TICKS(1000));
     int adc_value;
     adc_oneshot_unit_handle_t adc_handle;
+    adc_cali_handle_t adc_cali_handle;
 
-    // Initialize ADC Oneshot Mode Driver on the ADC Unit
+    int adc_buffer[ADC_BUFFER_SIZE] = {0};
+    int buffer_index = 0;
+
     adc_oneshot_unit_init_cfg_t init_config = {
         .unit_id = ADC_UNIT_1,
-        .clk_src = ADC_DIGI_CLK_SRC_DEFAULT};
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc_handle));
-
-    // Configure ADC channel
-    adc_oneshot_chan_cfg_t config = {
-        .bitwidth = ADC_BITWIDTH,
-        .atten = ADC_ATTEN,
     };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_PIN, &config));
+    adc_oneshot_new_unit(&init_config, &adc_handle);
+
+    adc_oneshot_chan_cfg_t config = {
+        .atten = ADC_ATTEN, // Full 0–3.3V range
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    adc_oneshot_config_channel(adc_handle, ADC_PIN, &config);
+
+    adc_cali_curve_fitting_config_t cali_config = {
+        .unit_id = ADC_UNIT_1,
+        .atten = ADC_ATTEN,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+
+    adc_cali_create_scheme_curve_fitting(&cali_config, &adc_cali_handle);
 
     // ADC Oneshot Analog Read loop
+    int i = 0;
     while (1)
     {
-        // Read ADC value with Oneshot
-        ESP_ERROR_CHECK(adc_oneshot_read(adc_handle, ADC_PIN, &adc_value));
-        // Print ADC value
-        float voltage = (float)adc_value / 4096.0 * 3.3;
-        ESP_LOGI("Voltage", "%f", voltage);
-        // Delay 1 second
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        int raw;
+        int voltage_mv;
+
+        adc_oneshot_read(adc_handle, ADC_PIN, &raw);
+
+        // Store measurement in circular buffer
+        adc_buffer[buffer_index] = raw;
+        buffer_index = (buffer_index + 1) % ADC_BUFFER_SIZE;
+
+        // Calculate average of last 20 measurements
+        int sum = 0;
+        for (int i = 0; i < ADC_BUFFER_SIZE; i++)
+        {
+            sum += adc_buffer[i];
+        }
+        int average_raw = sum / ADC_BUFFER_SIZE;
+
+        adc_cali_raw_to_voltage(adc_cali_handle, raw, &voltage_mv);
+
+        float voltage = voltage_mv / 1000.0f;
+
+        float current = (voltage - ACS758_ZERO_VOLT) / ACS758_SENSITIVITY;
+        if (i == 10000)
+        {
+            i = 0;
+            ESP_LOGI(TAG, "Current: %i, Average: %i", raw, voltage_mv);
+        }
+        i++;
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
 void throttle(void *pvParameters)
 {
-    int adc_value;
-    adc_oneshot_unit_handle_t adc_handle;
-
-    // Initialize ADC Oneshot Mode Driver on the ADC Unit
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1,
-        .clk_src = ADC_DIGI_CLK_SRC_DEFAULT};
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc_handle));
-
-    // Configure ADC channel
-    adc_oneshot_chan_cfg_t config = {
-        .bitwidth = ADC_BITWIDTH,
-        .atten = ADC_ATTEN,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_3, &config));
-
     ESP_LOGI(TAG, "Create RMT TX channel");
     rmt_channel_handle_t esc_chan = NULL;
     rmt_tx_channel_config_t tx_chan_config = {
@@ -215,15 +239,9 @@ void throttle(void *pvParameters)
     ESP_ERROR_CHECK(rmt_transmit(esc_chan, dshot_encoder, &throttle, sizeof(throttle), &tx_config));
     vTaskDelay(pdMS_TO_TICKS(5000));
 
-    ESP_LOGI(TAG, "Increase throttle, no telemetry");
-    for (uint16_t thro = 50; thro < 2047; thro += 10)
+    ESP_LOGI(TAG, "Increase throttle");
+    for (uint16_t thro = 50; thro < 2047; thro += 1)
     {
-        if (end)
-        {
-            throttle.throttle = 0;
-            ESP_ERROR_CHECK(rmt_transmit(esc_chan, dshot_encoder, &throttle, sizeof(throttle), &tx_config));
-            return;
-        }
         ESP_LOGI(TAG, "Throttle: %i", thro);
         throttle.throttle = thro;
         ESP_ERROR_CHECK(rmt_transmit(esc_chan, dshot_encoder, &throttle, sizeof(throttle), &tx_config));
@@ -231,6 +249,27 @@ void throttle(void *pvParameters)
         // so that the new throttle can be updated on the output
         ESP_ERROR_CHECK(rmt_disable(esc_chan));
         ESP_ERROR_CHECK(rmt_enable(esc_chan));
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    ESP_LOGI(TAG, "Full throttle");
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    ESP_LOGI(TAG, "Slowing down");
+    for (uint16_t thro = 2047; thro > 48; thro -= 1)
+    {
+        ESP_LOGI(TAG, "Throttle: %i", thro);
+        throttle.throttle = thro;
+        ESP_ERROR_CHECK(rmt_transmit(esc_chan, dshot_encoder, &throttle, sizeof(throttle), &tx_config));
+        ESP_ERROR_CHECK(rmt_disable(esc_chan));
+        ESP_ERROR_CHECK(rmt_enable(esc_chan));
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    ESP_LOGI(TAG, "Turning off");
+    throttle.throttle = 0;
+    ESP_ERROR_CHECK(rmt_transmit(esc_chan, dshot_encoder, &throttle, sizeof(throttle), &tx_config));
+    ESP_ERROR_CHECK(rmt_disable(esc_chan));
+    ESP_ERROR_CHECK(rmt_enable(esc_chan));
+    while (1)
+    {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
@@ -242,5 +281,4 @@ void app_main()
     //  xTaskCreate(blink_led, "blink_led", configMINIMAL_STACK_SIZE * 2, NULL, 4, NULL);
     // xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 5, NULL);
     xTaskCreate(throttle, "throttle", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
-    // xTaskCreate(button, "button", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
 }
