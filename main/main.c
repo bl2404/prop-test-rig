@@ -8,7 +8,9 @@
 #include <mpu6050.h>
 #include <esp_adc/adc_oneshot.h>
 #include "driver/rmt_tx.h"
+#include <math.h>
 #include <dshot_esc_encoder.h>
+#include "ring_avg.h"
 
 #define LED_PIN 0 // no such a pin!
 #define TSCK3 10
@@ -33,7 +35,12 @@
 // Buffer for storing last 20 measurements
 #define ADC_BUFFER_SIZE 100
 
+#define THRO_MAX 2047
+#define THRO_MIN 48
+
 static const char *TAG = "prop-test-rig";
+static bool PUSH = 0;
+static bool READY_TO_READ = 0;
 
 int32_t get_tenso_data(hx711_t *tenso)
 {
@@ -119,6 +126,9 @@ void mpu6050_test(void *pvParameters)
     ESP_LOGI(TAG, "Accel range: %d", dev.ranges.accel);
     ESP_LOGI(TAG, "Gyro range:  %d", dev.ranges.gyro);
 
+    ring_avg_t avg;
+    ring_avg_init(&avg);
+
     while (1)
     {
         float temp;
@@ -128,12 +138,27 @@ void mpu6050_test(void *pvParameters)
         ESP_ERROR_CHECK(mpu6050_get_temperature(&dev, &temp));
         ESP_ERROR_CHECK(mpu6050_get_motion(&dev, &accel, &rotation));
 
-        ESP_LOGI(TAG, "**********************************************************************");
-        ESP_LOGI(TAG, "Acceleration: x=%.4f   y=%.4f   z=%.4f", accel.x, accel.y, accel.z);
-        ESP_LOGI(TAG, "Rotation:     x=%.4f   y=%.4f   z=%.4f", rotation.x, rotation.y, rotation.z);
-        ESP_LOGI(TAG, "Temperature:  %.1f", temp);
+        float total_accel = sqrtf(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z);
+        float vibr = fabsf(total_accel - 1.0f - 0.025385f); // with stationary offset.
+        // ESP_LOGI(TAG, "total vibr: %f", vibr);
+        ring_avg_push(&avg, vibr, &PUSH);
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        if (READY_TO_READ)
+        {
+            float finalAvg = ring_avg_get(&avg);
+            ESP_LOGI(TAG, "vibration: %f", finalAvg);
+            while (1)
+            {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        }
+
+        // ESP_LOGI(TAG, "**********************************************************************");
+        // ESP_LOGI(TAG, "Acceleration: x=%.4f   y=%.4f   z=%.4f", accel.x, accel.y, accel.z);
+        // ESP_LOGI(TAG, "Rotation:     x=%.4f   y=%.4f   z=%.4f", rotation.x, rotation.y, rotation.z);
+        // ESP_LOGI(TAG, "Temperature:  %.1f", temp);
+
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -240,28 +265,31 @@ void throttle(void *pvParameters)
     vTaskDelay(pdMS_TO_TICKS(5000));
 
     ESP_LOGI(TAG, "Increase throttle");
-    for (uint16_t thro = 50; thro < 2047; thro += 1)
+    for (uint16_t thro = THRO_MIN; thro < THRO_MAX; thro += 1)
     {
-        ESP_LOGI(TAG, "Throttle: %i", thro);
+        // ESP_LOGI(TAG, "Throttle: %i", thro);
         throttle.throttle = thro;
         ESP_ERROR_CHECK(rmt_transmit(esc_chan, dshot_encoder, &throttle, sizeof(throttle), &tx_config));
         // the previous loop transfer is till undergoing, we need to stop it and restart,
         // so that the new throttle can be updated on the output
         ESP_ERROR_CHECK(rmt_disable(esc_chan));
         ESP_ERROR_CHECK(rmt_enable(esc_chan));
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
     ESP_LOGI(TAG, "Full throttle");
+    PUSH = 1;
     vTaskDelay(pdMS_TO_TICKS(10000));
+    PUSH = 0;
+    READY_TO_READ = 1;
     ESP_LOGI(TAG, "Slowing down");
-    for (uint16_t thro = 2047; thro > 48; thro -= 1)
+    for (uint16_t thro = THRO_MAX; thro > THRO_MIN; thro -= 1)
     {
-        ESP_LOGI(TAG, "Throttle: %i", thro);
+        // ESP_LOGI(TAG, "Throttle: %i", thro);
         throttle.throttle = thro;
         ESP_ERROR_CHECK(rmt_transmit(esc_chan, dshot_encoder, &throttle, sizeof(throttle), &tx_config));
         ESP_ERROR_CHECK(rmt_disable(esc_chan));
         ESP_ERROR_CHECK(rmt_enable(esc_chan));
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
     ESP_LOGI(TAG, "Turning off");
     throttle.throttle = 0;
@@ -279,6 +307,6 @@ void app_main()
     // xTaskCreate(test, "test", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
     // xTaskCreate(adc_read, "adc_read", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
     //  xTaskCreate(blink_led, "blink_led", configMINIMAL_STACK_SIZE * 2, NULL, 4, NULL);
-    // xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 5, NULL);
+    xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 5, NULL);
     xTaskCreate(throttle, "throttle", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
 }
