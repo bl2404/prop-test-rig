@@ -11,6 +11,7 @@
 #include <math.h>
 #include <dshot_esc_encoder.h>
 #include "ring_avg.h"
+#include "tenso.h"
 
 #define LED_PIN 0 // no such a pin!
 #define TSCK3 10
@@ -42,49 +43,20 @@ static const char *TAG = "prop-test-rig";
 static bool PUSH = 0;
 static bool READY_TO_READ = 0;
 
-int32_t get_tenso_data(hx711_t *tenso)
+void get_tenso_weight(void *pvParameters)
 {
-    int32_t data = 0;
-    esp_err_t r = hx711_wait(tenso, 500);
-
-    if (r != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Device not found: %d (%s)\n", r, esp_err_to_name(r));
-    }
-
-    r = hx711_read_average(tenso, 5, &data);
-    if (r != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Could not read data: %d (%s)\n", r, esp_err_to_name(r));
-    }
-    return data;
-}
-
-void test(void *pvParameters)
-{
-    hx711_t tenso3 =
-        {
-            .dout = TDA3,
-            .pd_sck = TSCK3,
-            .gain = HX711_GAIN_A_64};
-    ESP_ERROR_CHECK(hx711_init(&tenso3));
-
-    hx711_t tenso2 =
-        {
-            .dout = TDA2,
-            .pd_sck = TSCK2,
-            .gain = HX711_GAIN_A_64};
-    ESP_ERROR_CHECK(hx711_init(&tenso2));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    tenso_t *tenso = (tenso_t *)pvParameters;
+    ring_avg_t avg;
+    ring_avg_init(&avg);
 
     while (1)
     {
-        int32_t data_tenso_3 = get_tenso_data(&tenso3);
-        int32_t data_tenso_2 = get_tenso_data(&tenso2);
-
-        double weight_2 = 0.0007796891947777704 * (double)data_tenso_2 - 114.54579575873767;
-        double weight_3 = 0.0007717730334784052 * (double)data_tenso_3 - 67.27574018734285;
-        printf("raw3: %li weight3: %.2f raw2: %li weight2: %.2f\n", data_tenso_3, weight_3, data_tenso_2, weight_2);
-        // ESP_LOGI(TAG, "Raw data tenso3: %" PRIi32 ", weight tenso2: %.2f", data_tenso_3, weight_2);
+        float weight = get_tenso_data(tenso);
+        // ESP_LOGI(TAG, "weight: %f", weight);
+        ring_avg_push(&avg, weight, &PUSH);
+        ring_avg_read_if_ready(&avg, READY_TO_READ, tenso->label);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -142,16 +114,7 @@ void mpu6050_test(void *pvParameters)
         float vibr = fabsf(total_accel - 1.0f - 0.025385f); // with stationary offset.
         // ESP_LOGI(TAG, "total vibr: %f", vibr);
         ring_avg_push(&avg, vibr, &PUSH);
-
-        if (READY_TO_READ)
-        {
-            float finalAvg = ring_avg_get(&avg);
-            ESP_LOGI(TAG, "vibration: %f", finalAvg);
-            while (1)
-            {
-                vTaskDelay(pdMS_TO_TICKS(1000));
-            }
-        }
+        ring_avg_read_if_ready(&avg, READY_TO_READ, "vibration");
 
         // ESP_LOGI(TAG, "**********************************************************************");
         // ESP_LOGI(TAG, "Acceleration: x=%.4f   y=%.4f   z=%.4f", accel.x, accel.y, accel.z);
@@ -304,9 +267,18 @@ void throttle(void *pvParameters)
 
 void app_main()
 {
-    // xTaskCreate(test, "test", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
+    // tenso_t tenso2;
+    tenso_t *tenso2 = malloc(sizeof(tenso_t));
+    tenso_init(tenso2, TDA2, TSCK2, 0.0007796891947777704, -114.54579575873767, "tenso 2");
+    xTaskCreate(get_tenso_weight, "tenso2", configMINIMAL_STACK_SIZE * 5, tenso2, 5, NULL);
+
+    tenso_t *tenso3 = malloc(sizeof(tenso_t));
+    tenso_init(tenso3, TDA3, TSCK3, 0.0007717730334784052, -67.27574018734285, "tenso 3");
+    xTaskCreate(get_tenso_weight, "tenso3", configMINIMAL_STACK_SIZE * 5, tenso3, 5, NULL);
+
     // xTaskCreate(adc_read, "adc_read", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
     //  xTaskCreate(blink_led, "blink_led", configMINIMAL_STACK_SIZE * 2, NULL, 4, NULL);
+
     xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 5, NULL);
     xTaskCreate(throttle, "throttle", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
 }
