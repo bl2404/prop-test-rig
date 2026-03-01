@@ -29,21 +29,15 @@
 #define DSHOT_ESC_RESOLUTION_HZ 40000000 // 40MHz resolution, DSHot protocol needs a relative high resolution
 #define DSHOT_ESC_GPIO_NUM 8
 
-#define ACS758_VCC 3.3f
-#define ACS758_ZERO_VOLT (ACS758_VCC / 2.0f) // ~1.65V
-#define ACS758_SENSITIVITY 0.040f            // V/A for ±50A
-
-// Buffer for storing last 20 measurements
-#define ADC_BUFFER_SIZE 100
-
-#define THRO_MAX 2047
+#define THRO_MAX 2047 // 2047
 #define THRO_MIN 48
+#define THRO_MAX_MS 8000
 
 static const char *TAG = "prop-test-rig";
 static bool PUSH = 0;
 static bool READY_TO_READ = 0;
 
-void get_tenso_weight(void *pvParameters)
+void tensometer_handler(void *pvParameters)
 {
     vTaskDelay(pdMS_TO_TICKS(100));
     tenso_t *tenso = (tenso_t *)pvParameters;
@@ -72,7 +66,7 @@ void blink_led(void *pvParameters)
     }
 }
 
-void mpu6050_test(void *pvParameters)
+void mpu6050_handler(void *pvParameters)
 {
     mpu6050_dev_t dev = {0};
 
@@ -114,7 +108,7 @@ void mpu6050_test(void *pvParameters)
         float vibr = fabsf(total_accel - 1.0f - 0.025385f); // with stationary offset.
         // ESP_LOGI(TAG, "total vibr: %f", vibr);
         ring_avg_push(&avg, vibr, &PUSH);
-        ring_avg_read_if_ready(&avg, READY_TO_READ, "vibration");
+        ring_avg_read_if_ready(&avg, READY_TO_READ, "vibration [G]");
 
         // ESP_LOGI(TAG, "**********************************************************************");
         // ESP_LOGI(TAG, "Acceleration: x=%.4f   y=%.4f   z=%.4f", accel.x, accel.y, accel.z);
@@ -125,15 +119,13 @@ void mpu6050_test(void *pvParameters)
     }
 }
 
-void adc_read(void *pvParameters)
+void amperes_handler(void *pvParameters)
 {
     vTaskDelay(pdMS_TO_TICKS(1000));
+
     int adc_value;
     adc_oneshot_unit_handle_t adc_handle;
     adc_cali_handle_t adc_cali_handle;
-
-    int adc_buffer[ADC_BUFFER_SIZE] = {0};
-    int buffer_index = 0;
 
     adc_oneshot_unit_init_cfg_t init_config = {
         .unit_id = ADC_UNIT_1,
@@ -152,41 +144,21 @@ void adc_read(void *pvParameters)
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
 
-    adc_cali_create_scheme_curve_fitting(&cali_config, &adc_cali_handle);
-
     // ADC Oneshot Analog Read loop
-    int i = 0;
+    ring_avg_t avg;
+    ring_avg_init(&avg);
+
     while (1)
     {
         int raw;
-        int voltage_mv;
-
+        float volts_to_binary_factor = 4096.0 / 3.3;
+        float sensitivity = 0.04f;
         adc_oneshot_read(adc_handle, ADC_PIN, &raw);
-
-        // Store measurement in circular buffer
-        adc_buffer[buffer_index] = raw;
-        buffer_index = (buffer_index + 1) % ADC_BUFFER_SIZE;
-
-        // Calculate average of last 20 measurements
-        int sum = 0;
-        for (int i = 0; i < ADC_BUFFER_SIZE; i++)
-        {
-            sum += adc_buffer[i];
-        }
-        int average_raw = sum / ADC_BUFFER_SIZE;
-
-        adc_cali_raw_to_voltage(adc_cali_handle, raw, &voltage_mv);
-
-        float voltage = voltage_mv / 1000.0f;
-
-        float current = (voltage - ACS758_ZERO_VOLT) / ACS758_SENSITIVITY;
-        if (i == 10000)
-        {
-            i = 0;
-            ESP_LOGI(TAG, "Current: %i, Average: %i", raw, voltage_mv);
-        }
-        i++;
-        vTaskDelay(pdMS_TO_TICKS(1));
+        float volts = raw * 3.3 / 1024;
+        float result = (volts - 1.65) / sensitivity;
+        ring_avg_push(&avg, result, &PUSH);
+        ring_avg_read_if_ready(&avg, READY_TO_READ, "current [A]");
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -241,7 +213,7 @@ void throttle(void *pvParameters)
     }
     ESP_LOGI(TAG, "Full throttle");
     PUSH = 1;
-    vTaskDelay(pdMS_TO_TICKS(10000));
+    vTaskDelay(pdMS_TO_TICKS(THRO_MAX_MS));
     PUSH = 0;
     READY_TO_READ = 1;
     ESP_LOGI(TAG, "Slowing down");
@@ -267,18 +239,17 @@ void throttle(void *pvParameters)
 
 void app_main()
 {
-    // tenso_t tenso2;
     tenso_t *tenso2 = malloc(sizeof(tenso_t));
-    tenso_init(tenso2, TDA2, TSCK2, 0.0007796891947777704, -114.54579575873767, "tenso 2");
-    xTaskCreate(get_tenso_weight, "tenso2", configMINIMAL_STACK_SIZE * 5, tenso2, 5, NULL);
+    tenso_init(tenso2, TDA2, TSCK2, 0.0007796891947777704, -114.54579575873767, "tenso 2 [g]");
+    xTaskCreate(tensometer_handler, "tenso2", configMINIMAL_STACK_SIZE * 5, tenso2, 5, NULL);
 
     tenso_t *tenso3 = malloc(sizeof(tenso_t));
-    tenso_init(tenso3, TDA3, TSCK3, 0.0007717730334784052, -67.27574018734285, "tenso 3");
-    xTaskCreate(get_tenso_weight, "tenso3", configMINIMAL_STACK_SIZE * 5, tenso3, 5, NULL);
+    tenso_init(tenso3, TDA3, TSCK3, 0.0007717730334784052, -67.27574018734285, "tenso 3 [g]");
+    xTaskCreate(tensometer_handler, "tenso3", configMINIMAL_STACK_SIZE * 5, tenso3, 5, NULL);
 
-    // xTaskCreate(adc_read, "adc_read", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
+    xTaskCreate(amperes_handler, "adc_read", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
     //  xTaskCreate(blink_led, "blink_led", configMINIMAL_STACK_SIZE * 2, NULL, 4, NULL);
 
-    xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 5, NULL);
+    xTaskCreate(mpu6050_handler, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 5, NULL);
     xTaskCreate(throttle, "throttle", configMINIMAL_STACK_SIZE * 5, NULL, 5, NULL);
 }
