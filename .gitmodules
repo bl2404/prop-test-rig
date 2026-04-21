@@ -1,3 +1,6 @@
 [submodule "esp32-dev-container-template"]
 	path = esp32-dev-container-template
 	url = https://github.com/bl2404/esp32-dev-container-template.git
+[submodule "components/as5600-espidf"]
+	path = components/as5600-espidf
+	url = https://github.com/bl2404/as5600-espidf.git

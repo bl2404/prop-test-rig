@@ -5,7 +5,8 @@ dependencies:
     version: '*'
   esp-idf-lib/i2cdev:
     version: '*'
-  esp-idf-lib/mpu6050: 
+  esp-idf-lib/mpu6050:
     version: '*'
+  espp/as5600: ^1.0.35
 description: default
 version: 1.0.0

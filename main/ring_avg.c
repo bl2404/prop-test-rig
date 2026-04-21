@@ -43,3 +43,11 @@ void ring_avg_read_if_ready(const ring_avg_t *r, bool ready, char *label)
         }
     }
 }
+
+void print_all(ring_avg_t *r)
+{
+    for (int i = 0; i < BUFFER_SIZE; i++)
+    {
+        ESP_LOGI(TAG, "angle %i: %.2f", i, r->buf[i]);
+    }
+}
